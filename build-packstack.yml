@@ -1,0 +1,126 @@
+---
+
+- hosts: deploy
+  sudo: True
+  tasks:
+  - block:
+
+    - name: get baseOS ID
+      shell: btrfs subvolume list / | grep -E "snaps/baseOS$" | awk '{print $2}'
+      register: snapid
+
+    - debug: msg={{snapid}}
+    - debug: msg={{snapid.stdout}}
+
+    - name: set default to baseOS
+      shell: btrfs subvolume set-default {{snapid.stdout}} /
+
+    - name: sync
+      shell: (sync && sync && sync)
+
+    - name: restart machine
+      shell: sleep 2 && shutdown -r now "Ansible updates triggered"
+      async: 1
+      poll: 0
+      sudo: true
+      ignore_errors: true
+
+    - name: Wait for the server to finish rebooting
+      sudo: no
+      local_action: wait_for host={{ inventory_hostname }} search_regex=OpenSSH delay=10 port=22 timeout=300
+
+    - name: yum update       
+      yum: name=* state=latest
+
+    - name: yum rsync       
+      yum: name=rsync state=present
+
+    - name: yum screen       
+      yum: name=screen state=present
+
+    - name: yum patch       
+      yum: name=patch state=present
+
+    - name: take snapshot
+      shell: btrfs subvolume snapshot / /snaps/{{os_version}}-packstack
+
+    - name: snapid
+      shell: btrfs subvolume show /snaps/{{os_version}}-packstack | grep -E "Object ID:" | awk '{print $3}'
+      register: snapid
+
+    - debug: msg={{snapid.stdout}}
+
+    - name: snap set default
+      shell: btrfs subvolume set-default {{snapid.stdout}} /
+
+    - name: sync
+      shell: (sync && sync && sync)
+
+    - name: restart machine
+      shell: sleep 2 && shutdown -r now "Ansible updates triggered"
+      async: 1
+      poll: 0
+      sudo: true
+      ignore_errors: true
+
+    - name: Wait for the server to finish rebooting
+      sudo: no
+      local_action: wait_for host={{ inventory_hostname }} search_regex=OpenSSH delay=10 port=22 timeout=435
+
+    when: (deploy_snapshot == 'true') and (deploy_packstack == 'true')
+
+- hosts: controller
+  sudo: True
+  tasks:
+    - block:
+
+      - name:  setenforce
+        shell: setenforce 0
+
+      - name: stop firewall
+        shell: systemctl stop firewalld
+
+      - name: disable firewall
+        shell: systemctl disable firewalld
+        shell: systemctl stop NetworkManager
+
+      - name: disable NetworkManager
+        shell: systemctl disable NetworkManager
+
+      - name: update all packages
+        yum: name=* state=latest
+
+
+      - name: Install openstack
+        yum: name=https://repos.fedorapeople.org/repos/openstack/openstack-liberty/rdo-release-liberty-5.noarch.rpm state=present
+
+      - name: Install Packstack
+        yum: name=openstack-packstack state=present
+
+
+      - name: install my_answers.txt
+        template: src=my_answers.j2 dest=/root/my_answers.txt
+
+      - name: Install OpenStack
+        shell: packstack --answer-file my_answers.txt
+
+      when: deploy_packstack == 'true'
+
+    - block: 
+      - name: get external interface ID
+        shell:  ip a | grep {{ inventory_hostname }} | awk '{print $7}'
+        register: ext_interface_data
+
+      - debug: var=groups['controller'][0]
+
+      - set_fact: ext_interface={{ext_interface_data.stdout}}
+
+      - debug: var=ext_interface
+
+      - name: move the ifcfg-interface file
+        template: src=ifcfg-eth.j2 dest=/etc/sysconfig/network-scripts/ifcfg-{{ext_interface}}
+
+      - name: move the ifcfg-brex interface file
+        template: src=ifcfg-brex.j2 dest=/etc/sysconfig/network-scripts/ifcfg-brex
+
+      when: deploy_external_interface == 'true'
